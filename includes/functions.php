@@ -674,3 +674,129 @@ function updateVehicleStatus($id, $status) {
     
     return $conn->query($sql);
 }
+
+
+
+/**
+ * Get all vehicles
+ * @return array
+ */
+function getAllVehicles() {
+    global $conn;
+    
+    $sql = "SELECT * FROM vehicles ORDER BY make, model";
+    $result = $conn->query($sql);
+    $vehicles = [];
+    
+    if ($result->num_rows > 0) {
+        while ($row = $result->fetch_assoc()) {
+            $vehicles[] = $row;
+        }
+    }
+    
+    return $vehicles;
+}
+
+/**
+ * Update booking details
+ * @param int $bookingId
+ * @param string $customerName
+ * @param string $customerEmail
+ * @param int $vehicleId
+ * @param string $pickupDate
+ * @param string $pickupLocation
+ * @param string $returnDate
+ * @param string $returnLocation
+ * @param float $totalAmount
+ * @param string $bookingStatus
+ * @return bool
+ */
+function updateBooking($bookingId, $customerName, $customerEmail, $vehicleId, $pickupDate, $pickupLocation, $returnDate, $returnLocation, $totalAmount, $bookingStatus) {
+    global $conn;
+    
+    $bookingId = (int) $bookingId;
+    $vehicleId = (int) $vehicleId;
+    $pickupDate = sanitize($pickupDate);
+    $pickupLocation = sanitize($pickupLocation);
+    $returnDate = sanitize($returnDate);
+    $returnLocation = sanitize($returnLocation);
+    $totalAmount = (float) $totalAmount;
+    $bookingStatus = sanitize($bookingStatus);
+    
+    // Get the booking's current vehicle_id and status
+    $currentBookingSql = "SELECT vehicle_id, booking_status FROM bookings WHERE id = {$bookingId}";
+    $currentBookingResult = $conn->query($currentBookingSql);
+    $currentBooking = $currentBookingResult->fetch_assoc();
+    
+    // Begin transaction
+    $conn->begin_transaction();
+    
+    try {
+        // Update booking
+        $sql = "UPDATE bookings SET 
+                vehicle_id = {$vehicleId},
+                pickup_date = '{$pickupDate}',
+                pickup_location = '{$pickupLocation}',
+                return_date = '{$returnDate}',
+                return_location = '{$returnLocation}',
+                total_amount = {$totalAmount},
+                booking_status = '{$bookingStatus}',
+                updated_at = NOW()
+                WHERE id = {$bookingId}";
+        
+        $conn->query($sql);
+        
+        // Update user information if customer_name or customer_email changed
+        $booking = getBookingById($bookingId);
+        $userId = $booking['user_id'];
+        
+        if ($customerName !== $booking['customer_name'] || $customerEmail !== $booking['customer_email']) {
+            $customerName = sanitize($customerName);
+            $customerEmail = sanitize($customerEmail);
+            
+            $updateUserSql = "UPDATE users SET 
+                              name = '{$customerName}',
+                              email = '{$customerEmail}'
+                              WHERE id = {$userId}";
+            
+            $conn->query($updateUserSql);
+        }
+        
+        // Handle vehicle status changes
+        $oldVehicleId = $currentBooking['vehicle_id'];
+        $oldStatus = $currentBooking['booking_status'];
+        
+        // If the vehicle has changed, update the statuses of both the old and new vehicles
+        if ($oldVehicleId != $vehicleId) {
+            // Make the old vehicle available if it was in use by this booking
+            if ($oldStatus == 'Pending' || $oldStatus == 'Confirmed') {
+                updateVehicleStatus($oldVehicleId, 'Available');
+            }
+            
+            // Set the new vehicle to booked if the booking is active
+            if ($bookingStatus == 'Pending' || $bookingStatus == 'Confirmed') {
+                updateVehicleStatus($vehicleId, 'Booked');
+            }
+        } 
+        // If the vehicle is the same but the status changed
+        else if ($oldStatus != $bookingStatus) {
+            // If booking is now Completed or Cancelled, make vehicle Available
+            if ($bookingStatus == 'Completed' || $bookingStatus == 'Cancelled') {
+                updateVehicleStatus($vehicleId, 'Available');
+            } 
+            // If booking was Completed or Cancelled but is now active, make vehicle Booked
+            else if (($oldStatus == 'Completed' || $oldStatus == 'Cancelled') && 
+                    ($bookingStatus == 'Pending' || $bookingStatus == 'Confirmed')) {
+                updateVehicleStatus($vehicleId, 'Booked');
+            }
+        }
+        
+        // Commit transaction
+        $conn->commit();
+        return true;
+    } catch (Exception $e) {
+        // Roll back transaction on error
+        $conn->rollback();
+        return false;
+    }
+}
